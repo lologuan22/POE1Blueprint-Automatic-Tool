@@ -1,20 +1,27 @@
 import os
+import sys
 import time
 from itertools import product
 
 import cv2
-import keyboard
 import mss
 import numpy as np
 import pyautogui
+from pynput import keyboard as pynput_keyboard
 
-# ====================== 1. 全局控制与路径配置 ======================
+# ====================== 1. 全局控制与 PyInstaller 路径自适应 ======================
 pyautogui.FAILSAFE = True
 running = False
 stop = False
 restart = False
+USE_EXTENDED_BACKPACK = False  # ⚡ F12 开关：是否将处理完的图纸顺手放回扩展背包
 
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+# ⚡⚡⚡ 兼容 PyInstaller 打包（临时解压目录）与源码运行 ⚡⚡⚡
+if getattr(sys, 'frozen', False):
+    CURRENT_DIR = sys._MEIPASS
+else:
+    CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 TEMPLATE_DIR = os.path.join(CURRENT_DIR, "name_templates")
 
 # ====================== 2. 分辨率自适应 ======================
@@ -34,7 +41,7 @@ def s(x, y=None):
 
 # ====================== 3. 延迟参数 ======================
 CLICK_DELAY = 0.03
-WAIT_DELAY = 0.1
+WAIT_DELAY = 0.2
 STEP = 0.01
 
 # ====================== 4. 遮挡区与关闭按钮坐标 ======================
@@ -44,11 +51,11 @@ CLOSE_BTN_X, CLOSE_BTN_Y = s(1240, 410)
 # ====================== 5. 人物优先级权重字典 ======================
 CHARACTER_PRIORITY = {
     "Vinderi": 1000,  # 温德利
-    "Karst": 700,  # 卡斯特
-    "Nenet": 500,  # 奈尼特
-    "Gianna": 100,  # 工具人
+    "Karst": 700,     # 卡斯特
+    "Nenet": 500,     # 奈尼特
+    "Gianna": 100,    # 工具人
     "Huck": 100,
-    "Tullina": 100,
+    "Tullina": 300,
     "Isla": 100,
     "Tibbs": 100,
     "Niles": 100,
@@ -59,11 +66,11 @@ BASE_TEMPLATE_W, BASE_TEMPLATE_H = 60, 25
 NAME_OFFSET_Y = 21
 
 FIVE_GOLD_ANCHORS_1K = [
-    (825, 567),  # Pos 0: 3人最左
-    (891, 567),  # Pos 1: 2人左
-    (956, 567),  # Pos 2: 3人中
+    (825, 567),   # Pos 0: 3人最左
+    (891, 567),   # Pos 1: 2人左
+    (956, 567),   # Pos 2: 3人中
     (1021, 567),  # Pos 3: 2人右
-    (1086, 567)  # Pos 4: 3人最右
+    (1086, 567)   # Pos 4: 3人最右
 ]
 
 TARGET_OFFSET_Y = s(70)
@@ -77,57 +84,77 @@ MAX_AREA = int(250000 * scale_area)
 
 SCAN_REGION = (s(320), s(100), s(1700), s(900))
 SECOND_CLICK_POS = s(860, 540)
-BACKPACK_START = s(1296, 616)
+
+# 主背包坐标 (12列 x 5行 = 60格)
+BACKPACK_START_X = 1301.5 * scale_w
+BACKPACK_START_Y = 616.0 * scale_h
 GRID_COLS = 12
 GRID_ROWS = 5
-GRID_STEP = s(51, 51)
+GRID_STEP_X = 52.3 * scale_w
+GRID_STEP_Y = 52.3 * scale_h
+GRID_SIZE = int(50 * scale_w)
+
+# 🚩 修正：扩展背包配置 (6列 x 5行 = 30格)
+EXT_COLS = 6
+EXT_ROWS = 5
+EXT_GAP = 17.0 * scale_w  # 主背包与扩展背包的间隔
+
+# 🚩 核心修正：低于 10 个像素的垃圾红点直接丢弃！
+MIN_RED_PIXELS = 10
+
 MARK_POS = s(956, 930)
 C1_POS = s(960, 980)
 
 
-# ====================== 7. 工具与快捷键函数 ======================
-def safe_click(x, y):
-    """
-    ⚡⚡⚡ 拟真点击：先 moveTo 建立 UI Hover 上下文，再 click ⚡⚡⚡
-    """
-    pyautogui.moveTo(x, y)
-    pyautogui.click()
-
-
+# ====================== 7. pynput 后台异步按键监听器（零延迟） ======================
 def show_speed():
     print(f"\r✅ CLICK_DELAY={CLICK_DELAY:.2f}s | WAIT_DELAY={WAIT_DELAY:.2f}s | ↑加快 ↓减慢 ", end="")
 
 
+def on_press(key):
+    global running, stop, restart, USE_EXTENDED_BACKPACK, CLICK_DELAY, WAIT_DELAY
+    try:
+        if key == pynput_keyboard.Key.f10:
+            running = not running
+            print("\n▶ 运行" if running else "\n⏸ 暂停")
+        elif key == pynput_keyboard.Key.f11:
+            stop = True
+            print("\n🛑 已停止")
+        elif key == pynput_keyboard.Key.f12:
+            USE_EXTENDED_BACKPACK = not USE_EXTENDED_BACKPACK
+            status = f"[开启] -> 放回左侧扩展背包(横{EXT_COLS}x竖{EXT_ROWS})" if USE_EXTENDED_BACKPACK else "[关闭] -> 放回主背包原位"
+            print(f"\n🔄 扩展背包放回模式切换为: {status}")
+        elif key == pynput_keyboard.Key.up:
+            CLICK_DELAY = max(0.01, CLICK_DELAY - STEP)
+            WAIT_DELAY = max(0.05, WAIT_DELAY - STEP)
+            show_speed()
+        elif key == pynput_keyboard.Key.down:
+            CLICK_DELAY += STEP
+            WAIT_DELAY += STEP
+            show_speed()
+    except Exception:
+        pass
+
+
+# 开启独立线程监听
+listener = pynput_keyboard.Listener(on_press=on_press)
+listener.start()
+
+
 def check_keys():
-    global running, stop, restart, CLICK_DELAY, WAIT_DELAY
-    if keyboard.is_pressed('f10'):
-        running = not running
-        print("\n▶ 运行" if running else "\n⏸ 暂停")
-        time.sleep(0.3)
-    if keyboard.is_pressed('f11'):
-        stop = True
-        print("\n🛑 已停止")
-    if keyboard.is_pressed('f12'):
-        restart = True
-        running = False
-        print("\n🔄 重来")
-        time.sleep(0.3)
-    if keyboard.is_pressed('up'):
-        CLICK_DELAY = max(0.01, CLICK_DELAY - STEP)
-        WAIT_DELAY = max(0.05, WAIT_DELAY - STEP)
-        show_speed()
-        time.sleep(0.15)
-    if keyboard.is_pressed('down'):
-        CLICK_DELAY += STEP
-        WAIT_DELAY += STEP
-        show_speed()
-        time.sleep(0.15)
+    pass
 
 
 def wait_continue():
+    """等待暂停恢复"""
     while not running and not stop and not restart:
-        check_keys()
         time.sleep(0.01)
+
+
+def safe_click(x, y):
+    """拟真点击：先 moveTo 建立 UI Hover，再 click"""
+    pyautogui.moveTo(x, y)
+    pyautogui.click()
 
 
 def capture_region(region):
@@ -153,7 +180,7 @@ def has_red_mark(pos, size=15):
             img_np = np.array(img)
             r, g, b = img_np[:, :, 2], img_np[:, :, 1], img_np[:, :, 0]
             return np.sum((r > 120) & (g < 130) & (b < 130)) >= 1
-    except:
+    except Exception:
         return False
 
 
@@ -165,7 +192,7 @@ def is_in_ban_zone(x, y):
 
 def close_modal():
     safe_click(CLOSE_BTN_X, CLOSE_BTN_Y)
-    time.sleep(0.1)
+    time.sleep(0.12)
 
 
 def is_golden_pixel(img_bgr):
@@ -244,9 +271,8 @@ def scan_slot_candidates_at_current_screen():
     return candidates
 
 
-# ====================== 9. 色块切死角 + 绝对固定 3 槽位 (12:5) 算法 ======================
+# ====================== 9. 色块切死角 + 死锁 3 槽位算法 ======================
 def crop_out_protrusions(cnt, mask_closed):
-    """【精确裁剪凸角】：切掉粘连的小杂质死角"""
     x, y, w, h = cv2.boundingRect(cnt)
     roi = mask_closed[y:y + h, x:x + w]
 
@@ -270,14 +296,13 @@ def crop_out_protrusions(cnt, mask_closed):
 
 
 def get_all_big_blocks():
-    """
-    ⚡⚡⚡ 新算法：绝对死锁 3 槽位 ⚡⚡⚡
-    以色块右边缘为基准，按 12:5 (2.4:1) 向左补齐扩展，并输出 3 个固定等分中心点
-    """
     img = capture_region(SCAN_REGION)
     mask = cv2.inRange(img, BACKGROUND_LOWER, BACKGROUND_UPPER)
-    kernel_size = max(5, int(15 * scale_w))
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+
+    kw = max(25, int(45 * scale_w))
+    kh = max(3, int(5 * scale_h))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kw, kh))
+
     mask_closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
     contours, _ = cv2.findContours(mask_closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -298,7 +323,6 @@ def get_all_big_blocks():
 
             if cw > 20 and ch > 10:
                 ideal_12_5_w = ch * (12.0 / 5.0)
-
                 x_right = cx + cw
                 corrected_cx = x_right - ideal_12_5_w
 
@@ -313,7 +337,6 @@ def get_all_big_blocks():
     if not big_blocks:
         return []
 
-    # 按从左到右排序
     big_blocks.sort(key=lambda block: block[0][0])
     return big_blocks
 
@@ -353,74 +376,75 @@ def solve_best_combination(slot_candidates_list):
     return list(best_combo) if best_combo else []
 
 
-# ====================== 10. 全图先识别，后统一分配点击 ======================
+# ====================== 10. 全图先识别，后统一分配点击（含详细日志） ======================
 def process_and_execute_smart_plan():
     big_blocks = get_all_big_blocks()
     if not big_blocks:
         print("⚠️ 未检测到有效的大方格区域")
         return
 
-    print(f"✅ 动态识别成功！检测到 {len(big_blocks)} 个色块，每个死锁 3 槽位，开始【阶段一：全图纯识别】...")
+    print(f"✅ 动态识别成功！检测到 {len(big_blocks)} 个色块，开始【阶段一：全图纯识别】...")
 
     all_blocks_plans = []
 
     # ==================== 🔍 阶段一：纯扫描与方案计算 ====================
     for block_idx, target_block_slots in enumerate(big_blocks):
-        check_keys()
         wait_continue()
         if stop or restart:
             return
 
+        print(f"  ------------------- 📦 色块 [{block_idx + 1}/{len(big_blocks)}] 识别中 -------------------")
         slot_candidates_list = []
-        num_slots = len(target_block_slots)  # 固定为 3
+        num_slots = len(target_block_slots)
 
         for slot_idx in range(num_slots):
-            check_keys()
             wait_continue()
             if stop or restart:
                 return
 
             sx, sy = target_block_slots[slot_idx]
-
-            # 使用 safe_click
             safe_click(sx, sy)
-            time.sleep(CLICK_DELAY)
+            time.sleep(0.12)
 
             candidates = scan_slot_candidates_at_current_screen()
             slot_candidates_list.append(candidates)
 
-            # 遮挡预判关窗
+            # ⚡ 打印当前 Slot 提取到的人名列表
+            if candidates:
+                cand_str = ", ".join([f"{c['char_name']}(匹配度:{c['score']:.2f})" for c in candidates])
+                print(f"     📍 Slot {slot_idx + 1} ({sx}, {sy}) 识别到: [ {cand_str} ]")
+            else:
+                print(f"     📍 Slot {slot_idx + 1} ({sx}, {sy}) 未识别到有效人物")
+
             if slot_idx + 1 < num_slots:
                 next_sx, next_sy = target_block_slots[slot_idx + 1]
                 if is_in_ban_zone(next_sx, next_sy):
                     close_modal()
 
-        # 扫描完当前色块，计算最优解
         valid_candidates_list = [c for c in slot_candidates_list if len(c) > 0]
         if valid_candidates_list:
             best_plan = solve_best_combination(valid_candidates_list)
             all_blocks_plans.append((target_block_slots, best_plan))
-            print(f"  └─ 色块 [{block_idx + 1}] 识别完毕，方案: {[c['char_name'] for c in best_plan]}")
+            # ⚡ 打印最终为此色块规划的算法最优解
+            plan_str = " -> ".join([c['char_name'] for c in best_plan])
+            print(f"     🎯 色块 [{block_idx + 1}] 决策阵容: {plan_str}\n")
 
         close_modal()
 
     # ==================== 🎯 阶段二：统一纯粹执行点击 ====================
-    print("\n🚀 全图识别完毕！开始【阶段二：全图统一上阵点击】...")
+    print("🚀 全图识别完毕！开始【阶段二：全图统一上阵点击】...")
 
     for block_idx, (target_block_slots, best_plan) in enumerate(all_blocks_plans):
         print(f"📦 执行色块 [{block_idx + 1}] 上阵...")
         for slot_i, choice in enumerate(best_plan):
-            check_keys()
             wait_continue()
             if stop or restart:
                 return
 
-            # 1. 点击槽位
             sx, sy = target_block_slots[slot_i]
             safe_click(sx, sy)
             time.sleep(CLICK_DELAY)
 
-            # 2. 点击上阵金圈 Y - 70 像素
             gx, gy = choice['gold_pos']
             target_x = gx
             target_y = gy - TARGET_OFFSET_Y
@@ -430,7 +454,7 @@ def process_and_execute_smart_plan():
             print(f"  └─ Slot [{slot_i + 1}] -> 点击坐标: ({target_x}, {target_y}) 上阵 [{choice['char_name']}]")
 
     safe_click(*SECOND_CLICK_POS)
-    print("\n✅ 所有色块统一点击与选人完成")
+    print("✅ 所有色块统一点击与选人完成\n")
     time.sleep(CLICK_DELAY)
 
     # ========== 3次重试 → 暂停 ==========
@@ -438,7 +462,6 @@ def process_and_execute_smart_plan():
     retry = 0
 
     while retry < max_retry:
-        check_keys()
         wait_continue()
         if stop or restart:
             return
@@ -457,48 +480,123 @@ def process_and_execute_smart_plan():
         print(f"重试 {retry}/{max_retry}")
 
     if retry >= max_retry:
-        print("\n⏸️ 3次失败 → 自动暂停")
-        print("按 F10 继续")
+        print("\n⏸️ 3次失败 → 自动暂停，按 F10 继续")
         global running
         running = False
-        while not running and not stop:
-            check_keys()
-            time.sleep(0.05)
+        wait_continue()
         safe_click(*C1_POS)
         time.sleep(CLICK_DELAY)
         safe_click(*MARK_POS)
         time.sleep(CLICK_DELAY)
 
 
-# ====================== 11. 背包网格与主循环 ======================
-def get_backpack_positions():
+# ====================== 11. 智能背包扫描与坐标计算 ======================
+def get_extended_fill_positions():
+    """ 生成扩展背包 30 格坐标 (S 型排列: 6列 x 5行) """
     ps = []
-    for col in range(GRID_COLS):
-        rows = range(GRID_ROWS) if col % 2 == 0 else reversed(range(GRID_ROWS))
+    ext_start_x = BACKPACK_START_X - (EXT_COLS * GRID_STEP_X) - EXT_GAP
+    ext_start_y = BACKPACK_START_Y
+
+    for col in range(EXT_COLS):
+        rows = range(EXT_ROWS) if col % 2 == 0 else reversed(range(EXT_ROWS))
         for row in rows:
-            x = BACKPACK_START[0] + col * GRID_STEP[0]
-            y = BACKPACK_START[1] + row * GRID_STEP[1]
-            ps.append((x, y))
+            cx = int(ext_start_x + col * GRID_STEP_X)
+            cy = int(ext_start_y + row * GRID_STEP_Y)
+            ps.append((cx, cy))
     return ps
 
 
+def scan_backpack_for_targets():
+    """ 智能扫描背包 60 格 """
+    print("\n📸 正在智能扫描背包...")
+    screen_img = capture_full_screen()
+    target_coords = []
+
+    already_done_count = 0
+    ignored_count = 0
+
+    for col in range(GRID_COLS):
+        for row in range(GRID_ROWS):
+            grid_idx = col * GRID_ROWS + row + 1
+
+            center_x = int(BACKPACK_START_X + col * GRID_STEP_X)
+            center_y = int(BACKPACK_START_Y + row * GRID_STEP_Y)
+
+            half_box = GRID_SIZE // 2
+            x1, y1 = max(0, center_x - half_box), max(0, center_y - half_box)
+            x2, y2 = min(screen_w, center_x + half_box), min(screen_h, center_y + half_box)
+
+            roi = screen_img[y1:y2, x1:x2]
+            if roi.size == 0:
+                continue
+
+            b, g, r = roi[:, :, 0], roi[:, :, 1], roi[:, :, 2]
+
+            # 红色标记检测
+            red_roi_mask = (r >= 140) & \
+                           ((r.astype(int) - g.astype(int)) >= 45) & \
+                           ((r.astype(int) - b.astype(int)) >= 45)
+
+            has_red = np.sum(red_roi_mask) >= MIN_RED_PIXELS
+
+            # 羊皮纸图纸特征检测
+            map_bg_roi_mask = (r >= 70) & (r <= 190) & \
+                              (g >= 60) & (g <= 180) & \
+                              (b >= 50) & (b <= 170) & \
+                              (r.astype(int) >= g.astype(int)) & \
+                              (g.astype(int) >= b.astype(int))
+
+            bg_pixel_count = np.sum(map_bg_roi_mask)
+            is_map = bg_pixel_count >= int(180 * scale_area)
+
+            if has_red:
+                already_done_count += 1
+            elif is_map:
+                target_coords.append((center_x, center_y))
+                print(f"  └─ 🎯 [格子 {grid_idx:02d}] 锁定待处理图纸，坐标: ({center_x}, {center_y})")
+            else:
+                ignored_count += 1
+
+    print("\n📊 扫描分析结果：")
+    print(f"  🔴 已标记(红色像素>={MIN_RED_PIXELS})：{already_done_count} 个")
+    print(f"  ⚪ 杂物 / 石头 / 垃圾点跳过    ：{ignored_count} 个")
+    print(f"  🟡 本轮待处理目标图纸         ：{len(target_coords)} 个\n")
+
+    return target_coords
+
+
 def process_all_backpack():
-    global running
+    global running, restart
     while not stop:
         running = False
         restart = False
-        ps = get_backpack_positions()
-        print(f"\n✅ 就绪 {len(ps)} 格 | F10 开始")
-        print(f"✅ 当前分辨率：{screen_w}x{screen_h} | 面积缩放：{scale_area:.2f}x")
+        ext_status = f"[开启 - 处理后放入扩展背包(横{EXT_COLS}x竖{EXT_ROWS})]" if USE_EXTENDED_BACKPACK else "[关闭 - 处理后放回主背包原位]"
+        print(f"\n✅ 自动化脚本准备就绪 | F10 运行 | F12 扩展模式: {ext_status}")
+        print(f"✅ 当前分辨率：{screen_w}x{screen_h} | 缩放比例：{scale_area:.2f}x")
         show_speed()
 
-        for idx, (bx, by) in enumerate(ps, 1):
-            check_keys()
+        wait_continue()
+        if stop:
+            break
+
+        target_positions = scan_backpack_for_targets()
+
+        if not target_positions:
+            print("💡 背包中没有检测到需要处理的图纸，程序自动暂停。")
+            continue
+
+        ext_fill_positions = get_extended_fill_positions()
+        ext_put_idx = 0
+
+        total_targets = len(target_positions)
+        print(f"🚀 锁定 {total_targets} 张图纸，开始精确处理...")
+
+        for idx, (bx, by) in enumerate(target_positions, 1):
             if stop or restart:
                 break
             wait_continue()
 
-            print(f"\n===== 第 {idx}/{len(ps)} 格 =====")
+            print(f"\n===== 处理第 [{idx}/{total_targets}] 张图纸 (主背包源坐标: {bx}, {by}) =====")
             time.sleep(0.05)
 
             safe_click(bx, by)
@@ -510,12 +608,23 @@ def process_all_backpack():
             process_and_execute_smart_plan()
             time.sleep(WAIT_DELAY)
 
+            if USE_EXTENDED_BACKPACK and ext_put_idx < len(ext_fill_positions):
+                rx, ry = ext_fill_positions[ext_put_idx]
+                safe_click(rx, ry)
+                print(f"  └─ 📥 图纸已放入扩展背包 第 [{ext_put_idx + 1}/30] 格 (坐标: {rx}, {ry})")
+                ext_put_idx += 1
+            else:
+                safe_click(bx, by)
+                print(f"  └─ ↩️ 图纸已放回主背包原位 (坐标: {bx}, {by})")
 
-# ====================== 12. 启动 ======================
+            time.sleep(WAIT_DELAY)
+
+
+# ====================== 12. 启动入口 ======================
 if __name__ == "__main__":
     print("=" * 70)
-    print(" F10 运行/暂停 | F11 停止 | F12 重来 | ↑↓ 调节速度")
+    print(" F10 运行/暂停 | F11 结束 | F12 切换扩展背包放回(6x5) | ↑↓ 调节速度")
     print(f"✅ 完美自适应分辨率：{screen_w}x{screen_h}")
-    print("✅ 已更新为【死锁 3 槽位 + safe_click 无缝上阵】模式！")
+    print(f"✅ 强效红点过滤：必须 >= {MIN_RED_PIXELS} 个红色像素才算做已标记，彻底杜绝噪点干扰！")
     print("=" * 70)
     process_all_backpack()
